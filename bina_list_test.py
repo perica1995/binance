@@ -10,6 +10,8 @@ binance.apiKey='test111'
 binance.secret='test1112'
 binance.options['defaultType']='future'
 
+##this is test scrypt
+
 apikey='test111'
 secret='test1112'
 
