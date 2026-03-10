@@ -1,0 +1,292 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Volume Profile Accumulation/Distribution Detector
+
+//@version=6
+indicator("Volume Profile - 大口 Accumulation/Distribution Detector", shorttitle="VP-AccDist", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ─────────────────────────────────────────────
+// 入力パラメータ
+// ─────────────────────────────────────────────
+lookbackPeriod   = input.int(50, "ルックバック期間", minval=10, maxval=500, tooltip="出来高プロファイルを計算する期間")
+numBins          = input.int(20, "価格帯の分割数", minval=5, maxval=100, tooltip="出来高プロファイルの価格帯分割数")
+volThresholdMult = input.float(2.0, "大口検知閾値 (倍率)", minval=1.0, maxval=10.0, step=0.1, tooltip="平均出来高に対する倍率。これを超えると大口とみなす")
+pocWidth         = input.int(3, "POC表示幅 (バー数)", minval=1, maxval=20)
+showVPBoxes      = input.bool(true, "出来高プロファイルバーを表示")
+showPOC          = input.bool(true, "POC (Point of Control) を表示")
+showVAH_VAL      = input.bool(true, "Value Area High/Low を表示")
+valueAreaPct     = input.float(70.0, "Value Area (%)", minval=50.0, maxval=95.0, step=1.0)
+accColor         = input.color(color.new(color.green, 20), "アキュムレーション色")
+distColor        = input.color(color.new(color.red, 20), "ディストリビューション色")
+neutralColor     = input.color(color.new(color.gray, 50), "中立色")
+signalSize        = input.string("large", "シグナルラベルサイズ", options=["tiny", "small", "normal", "large", "huge"])
+
+// ─────────────────────────────────────────────
+// 出来高プロファイル計算
+// ─────────────────────────────────────────────
+highestHigh = ta.highest(high, lookbackPeriod)
+lowestLow   = ta.lowest(low, lookbackPeriod)
+priceRange  = highestHigh - lowestLow
+binSize     = priceRange / numBins
+
+// 各ビンの出来高を集計
+// ビンごとの買い出来高・売り出来高を分離
+volBins     = array.new_float(numBins, 0.0)
+buyVolBins  = array.new_float(numBins, 0.0)
+sellVolBins = array.new_float(numBins, 0.0)
+
+if barstate.islast or barstate.isconfirmed
+    // リセット
+    for i = 0 to numBins - 1
+        array.set(volBins, i, 0.0)
+        array.set(buyVolBins, i, 0.0)
+        array.set(sellVolBins, i, 0.0)
+
+    // ルックバック期間の各バーを処理
+    for j = 0 to lookbackPeriod - 1
+        barHigh   = high[j]
+        barLow    = low[j]
+        barClose  = close[j]
+        barOpen   = open[j]
+        barVol    = volume[j]
+
+        // 各バーがカバーするビンに出来高を分配
+        binLow  = math.max(0, math.floor((barLow - lowestLow) / binSize))
+        binHigh = math.min(numBins - 1, math.floor((barHigh - lowestLow) / binSize))
+
+        if binHigh < 0
+            binHigh := 0
+        if binLow > numBins - 1
+            binLow := numBins - 1
+        if binLow > binHigh
+            binLow := binHigh
+
+        numCoveredBins = binHigh - binLow + 1
+        volPerBin      = barVol / math.max(numCoveredBins, 1)
+
+        // 買い/売りの判定: close > open → 買い優勢
+        isBuyBar = barClose >= barOpen
+
+        for k = binLow to binHigh
+            if k >= 0 and k < numBins
+                array.set(volBins, k, array.get(volBins, k) + volPerBin)
+                if isBuyBar
+                    array.set(buyVolBins, k, array.get(buyVolBins, k) + volPerBin)
+                else
+                    array.set(sellVolBins, k, array.get(sellVolBins, k) + volPerBin)
+
+// ─────────────────────────────────────────────
+// POC (Point of Control) - 最大出来高価格帯
+// ─────────────────────────────────────────────
+var int   pocIndex    = 0
+var float pocVolume   = 0.0
+var float totalVolume = 0.0
+
+if barstate.islast or barstate.isconfirmed
+    pocIndex    := 0
+    pocVolume   := 0.0
+    totalVolume := 0.0
+
+    for i = 0 to numBins - 1
+        v = array.get(volBins, i)
+        totalVolume += v
+        if v > pocVolume
+            pocVolume := v
+            pocIndex  := i
+
+pocPrice = lowestLow + (pocIndex + 0.5) * binSize
+
+// ─────────────────────────────────────────────
+// Value Area 計算 (POCから上下に拡張)
+// ─────────────────────────────────────────────
+var int vahIndex = 0
+var int valIndex = 0
+
+if barstate.islast or barstate.isconfirmed
+    vaTarget   = totalVolume * (valueAreaPct / 100.0)
+    vaVolume   = pocVolume
+    upperIdx   = pocIndex
+    lowerIdx   = pocIndex
+
+    while vaVolume < vaTarget and (upperIdx < numBins - 1 or lowerIdx > 0)
+        upperVol = upperIdx < numBins - 1 ? array.get(volBins, upperIdx + 1) : 0.0
+        lowerVol = lowerIdx > 0 ? array.get(volBins, lowerIdx - 1) : 0.0
+
+        if upperVol >= lowerVol
+            if upperIdx < numBins - 1
+                upperIdx += 1
+                vaVolume += upperVol
+        else
+            if lowerIdx > 0
+                lowerIdx -= 1
+                vaVolume += lowerVol
+
+    vahIndex := upperIdx
+    valIndex := lowerIdx
+
+vahPrice = lowestLow + (vahIndex + 1) * binSize
+valPrice = lowestLow + valIndex * binSize
+
+// ─────────────────────────────────────────────
+// 大口アキュムレーション/ディストリビューション検知
+// ─────────────────────────────────────────────
+
+// 現在のバーの出来高が大口レベルか判定
+avgVol       = ta.sma(volume, lookbackPeriod)
+isHighVolume = volume > avgVol * volThresholdMult
+
+// 価格がValue Area内のどこにあるか
+priceInVA     = close >= valPrice and close <= vahPrice
+priceBelowVA  = close < valPrice
+priceAboveVA  = close > vahPrice
+
+// デルタ出来高 (買い - 売り圧力の推定)
+// close が barの range 内のどの位置にあるかで推定
+barRange     = high - low
+buyPressure  = barRange > 0 ? (close - low) / barRange : 0.5
+sellPressure = 1.0 - buyPressure
+deltaVolume  = volume * (buyPressure - sellPressure)
+
+// 累積デルタ
+cumDelta     = ta.cum(deltaVolume)
+deltaSMA     = ta.sma(deltaVolume, 14)
+
+// POC付近での大口活動検知
+pocProximity     = math.abs(close - pocPrice) <= binSize * 2
+nearPocHighVol   = pocProximity and isHighVolume
+
+// ─────────────────────────────────────────────
+// シグナル判定ロジック
+// ─────────────────────────────────────────────
+
+// アキュムレーション条件:
+// 1. 大口出来高
+// 2. 価格がVA下端またはそれ以下
+// 3. 買い圧力が優勢 (デルタプラス)
+// 4. 下ヒゲが長い (吸収の兆候)
+lowerWick       = close > open ? (open - low) : (close - low)
+upperWick       = close > open ? (high - close) : (high - open)
+bodySize        = math.abs(close - open)
+isLongLowerWick = lowerWick > bodySize * 1.5
+
+accSignal = isHighVolume and (priceBelowVA or close <= valPrice + binSize) and deltaVolume > 0 and isLongLowerWick
+
+// ディストリビューション条件:
+// 1. 大口出来高
+// 2. 価格がVA上端またはそれ以上
+// 3. 売り圧力が優勢 (デルタマイナス)
+// 4. 上ヒゲが長い (配布の兆候)
+isLongUpperWick = upperWick > bodySize * 1.5
+
+distSignal = isHighVolume and (priceAboveVA or close >= vahPrice - binSize) and deltaVolume < 0 and isLongUpperWick
+
+// POC付近での大口アキュムレーション (ステルス蓄積)
+stealthAcc  = nearPocHighVol and deltaVolume > 0 and bodySize < barRange * 0.3
+stealthDist = nearPocHighVol and deltaVolume < 0 and bodySize < barRange * 0.3
+
+// ─────────────────────────────────────────────
+// 出来高プロファイル描画
+// ─────────────────────────────────────────────
+var box[]   vpBoxes   = array.new_box()
+var line    pocLine   = na
+var line    vahLine   = na
+var line    valLine   = na
+var label[] sigLabels = array.new_label()
+
+if barstate.islast and showVPBoxes
+    // 前回の描画をクリア
+    for i = 0 to array.size(vpBoxes) - 1
+        box.delete(array.get(vpBoxes, i))
+    array.clear(vpBoxes)
+
+    maxBinVol = pocVolume
+    barWidth  = math.max(1, math.round(lookbackPeriod * 0.4))
+
+    for i = 0 to numBins - 1
+        binVol   = array.get(volBins, i)
+        buyVol   = array.get(buyVolBins, i)
+        sellVol  = array.get(sellVolBins, i)
+        width    = math.max(1, math.round(barWidth * (binVol / maxBinVol)))
+        binBot   = lowestLow + i * binSize
+        binTop   = binBot + binSize
+
+        // 買い/売り比率で色を決定
+        ratio    = binVol > 0 ? buyVol / binVol : 0.5
+        binColor = ratio > 0.55 ? color.new(accColor, 60) : ratio < 0.45 ? color.new(distColor, 60) : color.new(neutralColor, 60)
+
+        b = box.new(bar_index - width, binTop, bar_index, binBot, border_color=color.new(color.white, 80), bgcolor=binColor)
+        array.push(vpBoxes, b)
+
+// POCライン描画
+if barstate.islast and showPOC
+    if not na(pocLine)
+        line.delete(pocLine)
+    pocLine := line.new(bar_index - lookbackPeriod, pocPrice, bar_index + pocWidth, pocPrice, color=color.new(color.yellow, 0), width=2, style=line.style_solid)
+
+// VAH/VALライン描画
+if barstate.islast and showVAH_VAL
+    if not na(vahLine)
+        line.delete(vahLine)
+    if not na(valLine)
+        line.delete(valLine)
+    vahLine := line.new(bar_index - lookbackPeriod, vahPrice, bar_index + pocWidth, vahPrice, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+    valLine := line.new(bar_index - lookbackPeriod, valPrice, bar_index + pocWidth, valPrice, color=color.new(color.blue, 30), width=1, style=line.style_dashed)
+
+// ─────────────────────────────────────────────
+// シグナルラベル描画
+// ─────────────────────────────────────────────
+labelSz = switch signalSize
+    "tiny"   => size.tiny
+    "small"  => size.small
+    "normal" => size.normal
+    "large"  => size.large
+    "huge"   => size.huge
+
+if accSignal
+    label.new(bar_index, low, "ACC\n大口買集", style=label.style_label_up, color=accColor, textcolor=color.white, size=labelSz, tooltip="大口アキュムレーション検知\nVol: " + str.tostring(volume, format.volume) + "\nDelta: " + str.tostring(deltaVolume, "#.##"))
+
+if distSignal
+    label.new(bar_index, high, "DIST\n大口売抜", style=label.style_label_down, color=distColor, textcolor=color.white, size=labelSz, tooltip="大口ディストリビューション検知\nVol: " + str.tostring(volume, format.volume) + "\nDelta: " + str.tostring(deltaVolume, "#.##"))
+
+if stealthAcc
+    label.new(bar_index, low, "S-ACC\nステルス蓄積", style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=labelSz, tooltip="POC付近でのステルス蓄積\n小さいボディ + 大出来高\nDelta: " + str.tostring(deltaVolume, "#.##"))
+
+if stealthDist
+    label.new(bar_index, high, "S-DIST\nステルス配布", style=label.style_label_down, color=color.new(color.orange, 20), textcolor=color.white, size=labelSz, tooltip="POC付近でのステルス配布\n小さいボディ + 大出来高\nDelta: " + str.tostring(deltaVolume, "#.##"))
+
+// ─────────────────────────────────────────────
+// 背景色 (大口活動期間のハイライト)
+// ─────────────────────────────────────────────
+bgColor = accSignal ? color.new(accColor, 90) : distSignal ? color.new(distColor, 90) : stealthAcc ? color.new(color.teal, 93) : stealthDist ? color.new(color.orange, 93) : na
+bgcolor(bgColor)
+
+// ─────────────────────────────────────────────
+// 情報テーブル
+// ─────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 70), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "POC", text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(pocPrice, format.mintick), text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 1, "VAH", text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(vahPrice, format.mintick), text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 0, 2, "VAL", text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(valPrice, format.mintick), text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Cum Delta", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(cumDelta, format.volume), text_color=cumDelta > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 4, "Avg Vol", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(avgVol, format.volume), text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 5, "大口閾値", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(avgVol * volThresholdMult, format.volume), text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 6, "Delta SMA", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, str.tostring(deltaSMA, "#.##"), text_color=deltaSMA > 0 ? color.green : color.red, text_size=size.small)
+
+// ─────────────────────────────────────────────
+// アラート条件
+// ─────────────────────────────────────────────
+alertcondition(accSignal, title="大口アキュムレーション", message="大口アキュムレーション検知: {{ticker}} @ {{close}}")
+alertcondition(distSignal, title="大口ディストリビューション", message="大口ディストリビューション検知: {{ticker}} @ {{close}}")
+alertcondition(stealthAcc, title="ステルス蓄積", message="ステルス蓄積検知 (POC付近): {{ticker}} @ {{close}}")
+alertcondition(stealthDist, title="ステルス配布", message="ステルス配布検知 (POC付近): {{ticker}} @ {{close}}")
+alertcondition(accSignal or stealthAcc, title="全アキュムレーション", message="アキュムレーション検知: {{ticker}} @ {{close}}")
+alertcondition(distSignal or stealthDist, title="全ディストリビューション", message="ディストリビューション検知: {{ticker}} @ {{close}}")
