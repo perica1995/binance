@@ -27,7 +27,7 @@ signalSize        = input.string("large", "シグナルラベルサイズ", opti
 highestHigh = ta.highest(high, lookbackPeriod)
 lowestLow   = ta.lowest(low, lookbackPeriod)
 priceRange  = highestHigh - lowestLow
-binSize     = priceRange / numBins
+binSize     = priceRange > 0 ? priceRange / numBins : syminfo.mintick
 
 // 各ビンの出来高を集計
 // ビンごとの買い出来高・売り出来高を分離
@@ -35,7 +35,7 @@ volBins     = array.new_float(numBins, 0.0)
 buyVolBins  = array.new_float(numBins, 0.0)
 sellVolBins = array.new_float(numBins, 0.0)
 
-if barstate.islast or barstate.isconfirmed
+if (barstate.islast or barstate.isconfirmed) and priceRange > 0
     // リセット
     for i = 0 to numBins - 1
         array.set(volBins, i, 0.0)
@@ -82,7 +82,7 @@ var int   pocIndex    = 0
 var float pocVolume   = 0.0
 var float totalVolume = 0.0
 
-if barstate.islast or barstate.isconfirmed
+if (barstate.islast or barstate.isconfirmed) and priceRange > 0
     pocIndex    := 0
     pocVolume   := 0.0
     totalVolume := 0.0
@@ -102,7 +102,7 @@ pocPrice = lowestLow + (pocIndex + 0.5) * binSize
 var int vahIndex = 0
 var int valIndex = 0
 
-if barstate.islast or barstate.isconfirmed
+if (barstate.islast or barstate.isconfirmed) and priceRange > 0
     vaTarget   = totalVolume * (valueAreaPct / 100.0)
     vaVolume   = pocVolume
     upperIdx   = pocIndex
@@ -195,9 +195,10 @@ var label[] sigLabels = array.new_label()
 
 if barstate.islast and showVPBoxes
     // 前回の描画をクリア
-    for i = 0 to array.size(vpBoxes) - 1
-        box.delete(array.get(vpBoxes, i))
-    array.clear(vpBoxes)
+    if array.size(vpBoxes) > 0
+        for i = 0 to array.size(vpBoxes) - 1
+            box.delete(array.get(vpBoxes, i))
+        array.clear(vpBoxes)
 
     maxBinVol = pocVolume
     barWidth  = math.max(1, math.round(lookbackPeriod * 0.4))
